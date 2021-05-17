@@ -16,7 +16,7 @@ from gan_utils import *
 def parse_arguments():
     parser = ArgumentParser()    
     parser.add_argument("-b", "--batch_size", type=int, default=128)
-    parser.add_argument("-e", "--tot_epoch", type=int, default=100)
+    parser.add_argument("-e", "--tot_epoch", type=int, default=200)
     parser.add_argument("-r", "--G_num_layers", type=int, default=-1)
     parser.add_argument("-m", "--D_num_layers", type=int, default=-1)
     parser.add_argument("-g", "--G_hidden_size", type=int, default=-1)
@@ -51,6 +51,7 @@ def parse_arguments():
     parser.add_argument('--is_g_ctn', action='store_true')
     parser.add_argument('--is_wgan', action='store_true')
     parser.add_argument("--g_iter_x", type=int, default=1)
+    parser.add_argument('--is_anchor', action='store_true')
         
     return parser.parse_args()
       
@@ -65,6 +66,20 @@ os.environ["CUDA_DEVICE_ORDER"]="PCI_BUS_ID"
 os.environ["CUDA_VISIBLE_DEVICES"]= str(args.device)
 args.device = 0
 os.environ['TF_CPP_MIN_LOG_LEVEL'] = '3'
+# Data
+tr_speech_ds = torchaudio.datasets.LIBRISPEECH("{}/".format(args.data_dir), url="train-clean-100", download=True)
+va_speech_ds = torchaudio.datasets.LIBRISPEECH("{}/".format(args.data_dir), url="dev-clean", download=True)
+kwargs = {'num_workers': 0, 'pin_memory': True, 'drop_last': True}
+tr_speech_dataloader = data.DataLoader(dataset=tr_speech_ds,
+                            batch_size=args.batch_size,
+                            shuffle=True,
+                            collate_fn= lambda x: data_processing(x, args.n_frames, "speech"),
+                            **kwargs)
+va_speech_dataloader = data.DataLoader(dataset=va_speech_ds,
+                            batch_size=args.batch_size,
+                            shuffle=False,
+                            collate_fn= lambda x: data_processing(x, args.n_frames, "speech"),
+                            **kwargs)
 
 snr_ranges_all = [-5,0,5,10]
 loss_fn = nn.MSELoss()
@@ -144,6 +159,10 @@ for seed in range(40):
         te_ori_sdr = []
         
         prev_te_p = -100
+        
+        tr_speech_iter = iter(tr_speech_dataloader)
+        va_speech_iter = iter(va_speech_dataloader)
+        
         for ep in range(args.tot_epoch):
             # Train
             tr_s = shuffle_set(tr_s)
@@ -152,9 +171,9 @@ for seed in range(40):
             tr_s = tr_s[:tr_len-(tr_len%args.batch_size)]
             tr_x = tr_x[:tr_len-(tr_len%args.batch_size)]
 
-            upd_sdr, ori_sdr, L_gf, L_r, L_f, gp = run_gan_iter(
-                args, tr_s, tr_x, G_model, Orig_G_model, D_model, G_optimizer, D_optimizer)
-
+            L_gf, L_r, L_f, gp = run_gan_iter(
+                args, tr_x, tr_speech_iter, G_model, Orig_G_model, D_model, G_optimizer, D_optimizer)
+            upd_sdr, ori_sdr = run_adv_te_iter(args, tr_s, tr_x, G_model, Orig_G_model)
             tr_upd_sdr.append(upd_sdr)
             tr_ori_sdr.append(ori_sdr)
             tr_losses_gf.append(L_gf)
@@ -163,9 +182,9 @@ for seed in range(40):
             tr_losses_gp.append(gp)
 
             # Eval
-            upd_sdr, ori_sdr, L_gf, L_r, L_f, gp = run_gan_iter(
-                args, va_s, va_x, G_model, Orig_G_model, D_model)
-            
+            L_gf, L_r, L_f, gp = run_gan_iter(
+                args, va_x, va_speech_iter, G_model, Orig_G_model, D_model)
+            upd_sdr, ori_sdr = run_adv_te_iter(args, va_s, va_x, G_model, Orig_G_model)
             va_upd_sdr.append(upd_sdr)
             va_ori_sdr.append(ori_sdr)
             va_losses_gf.append(L_gf)
@@ -179,6 +198,8 @@ for seed in range(40):
             te_ori_sdr.append(ori_sdr)
 
             if (ep+1) % args.print_every == 0:
+                if args.is_anchor:
+                    print("Anchor")
                 logging.info("Epoch {} Training. USDR: {:.2f} | OSDR: {:.2f}. Losses. G: {:.2f} | Real: {:.2f} | Fake: {:.2f}".format(
                     ep, 
                     tr_upd_sdr[-1],
@@ -187,7 +208,6 @@ for seed in range(40):
                     tr_losses_r[-1],
                     tr_losses_f[-1],
                 ))
-
                 logging.info("Epoch {} Validation. USDR: {:.2f} | OSDR: {:.2f}. Losses. G: {:.2f} | Real: {:.2f} | Fake: {:.2f}".format(
                     ep, 
                     va_upd_sdr[-1],
@@ -199,19 +219,20 @@ for seed in range(40):
                 
                 if args.is_wgan:
                     logging.info("GP. Tr: {:.2f}, Va:{:.2f}".format(tr_losses_gp[-1], va_losses_gp[-1]))
-
+                if args.is_anchor:
+                    print("Anchor")
                 logging.info("Epoch {} Testing. USDR: {:.2f} | OSDR: {:.2f}".format(
                     ep, 
                     te_upd_sdr[-1],
                     te_ori_sdr[-1],
                 ))
             
-            if ep > 10:
-                curr_te_p = np.mean(te_upd_sdr[-5:])
-                if (curr_te_p - prev_te_p) < 0:
-                    logging.info("Epoch {} Exiting.".format(ep))
-                    break
-                prev_te_p = curr_te_p
+#             if ep > 10:
+#                 curr_te_p = np.mean(te_upd_sdr[-5:])
+#                 if (curr_te_p - prev_te_p) < 0:
+#                     logging.info("Epoch {} Exiting.".format(ep))
+#                     break
+#                 prev_te_p = curr_te_p
 
         seed_dict = {
             "tr_losses_gf": tr_losses_gf,
