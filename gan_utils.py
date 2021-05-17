@@ -49,7 +49,9 @@ def setup_gan_expr(args):
     else:
         D_opt = 'None'
     
-    save_dir = "{}/D{}_G{}/".format(args.save_dir, D_opt, G_opt)
+    save_dir = "{}/D{}_G{}".format(args.save_dir, D_opt, G_opt)
+    if args.is_anchor:
+        save_dir += "_Anc"
     if args.is_adv:
         save_dir = "{}/gx{}/lr{:.0e}/seed{}/snr{}/".format(save_dir, args.g_iter_x, args.learning_rate, args.seed, args.snr_ranges[0])
     
@@ -319,23 +321,29 @@ def adv_pass(args, s, e, D_model, idx, D_optimizer=None):
     return ret_vals
 
 # General
-def run_gan_iter(args, tot_s, tot_x, G_model, Orig_G_model, D_model, G_optimizer=None, D_optimizer=None):
+def run_gan_iter(args, tot_x, speech_dataloader, G_model, Orig_G_model, D_model, G_optimizer=None, D_optimizer=None):
     upd_res = []
     ori_res = []
     gf_res = []
     r_res = []
     f_res = []
     gp_res = []
-    for idx in range(0,len(tot_s),args.batch_size):
-        speech_batch = tot_s[idx:idx+args.batch_size].to(args.device)
+    speech_iter = iter(speech_dataloader)
+    for idx in range(0,len(tot_x),args.batch_size):
+        iter_ = idx//args.batch_size
+        try:
+            speech_batch = next(speech_iter)
+        except StopIteration:
+            speech_iter = iter(speech_dataloader)
+            speech_batch = next(speech_iter)
+        speech_batch = speech_batch.to(args.device)
         mix_batch = tot_x[idx:idx+args.batch_size].to(args.device)
+        speech_batch = speech_batch[:len(mix_batch)]
         
         if args.is_g_ctn:
             e = denoise_signal_ctn(args, mix_batch, G_model)
-            ori_e = denoise_signal_ctn(args, mix_batch, Orig_G_model)
         else:
             e = denoise_signal(args, mix_batch, G_model)
-            ori_e = denoise_signal(args, mix_batch, Orig_G_model)
 
         # Truncate to same lengths
         _, s, _ = prep_sig_ml(speech_batch, e)
@@ -345,35 +353,33 @@ def run_gan_iter(args, tot_s, tot_x, G_model, Orig_G_model, D_model, G_optimizer
         s = s/(s.std(1)[:,None] + eps)
         x = x/(x.std(1)[:,None] + eps)
         e = e/(e.std(1)[:,None] + eps)
-        ori_e = ori_e/(ori_e.std(1)[:,None] + eps)
-
-        e_sdr = float(calculate_sisdr(s, e).mean())
-        ori_sdr = float(calculate_sisdr(s, ori_e).mean())
-        del ori_e
-        
-        upd_res.append(e_sdr)
-        ori_res.append(ori_sdr)
         
         if args.is_wgan:
-            L_r, L_f, gp = adv_pass(args, s, e, D_model, idx, D_optimizer)
+            if args.is_anchor and (iter_+1) % 2 == 0:
+                L_r, L_f, gp = adv_pass(args, e, x, D_model, idx, D_optimizer)
+            else:
+                L_r, L_f, gp = adv_pass(args, s, e, D_model, idx, D_optimizer)
             gp_res.append(gp)
         else:
+            if args.is_anchor:
+                assert 1==0 # TODO
             L_r, L_f = adv_pass_bc_gan(args, s, e, D_model, idx, D_optimizer)
-        
         r_res.append(L_r)
         f_res.append(L_f)
         assert not torch.isnan(torch.Tensor(gf_res)).any()
             
         del e
             
-        if args.is_g_ctn:
-            e = denoise_signal_ctn(args, mix_batch, G_model)
-        else:
-            e = denoise_signal(args, mix_batch, G_model)
-        
+        # Update Generator
         if args.is_adv:
+            if args.is_g_ctn:
+                e = denoise_signal_ctn(args, mix_batch, G_model)
+            else:
+                e = denoise_signal(args, mix_batch, G_model)
+            e = e/(e.std(1)[:,None] + eps)
+            
             if G_optimizer:
-                G_optimizer.zero_grad()    
+                G_optimizer.zero_grad()
             E_mag = get_magnitude(stft(e, args.fft_size, args.hop_size)).permute(0,2,1)
             if args.is_wgan:
                 fake_loss = D_model(E_mag)
@@ -382,7 +388,7 @@ def run_gan_iter(args, tot_s, tot_x, G_model, Orig_G_model, D_model, G_optimizer
             assert not torch.isnan(torch.Tensor(fake_loss.detach().cpu())).any()
             fake_loss = (-fake_loss).mean()
             
-            if G_optimizer and (idx+1) % args.g_iter_x == 0:
+            if G_optimizer and (iter_+1) % args.g_iter_x == 0:
                 fake_loss.backward()
                 G_optimizer.step()
                 
@@ -390,9 +396,9 @@ def run_gan_iter(args, tot_s, tot_x, G_model, Orig_G_model, D_model, G_optimizer
             gf_res.append(L_gf)
             del fake_loss
         
-        del e
+            del e
         
-    return np.mean(upd_res), np.mean(ori_res), np.mean(gf_res), np.mean(r_res), np.mean(f_res), np.mean(gp_res)
+    return np.mean(gf_res), np.mean(r_res), np.mean(f_res), np.mean(gp_res)
 
 def run_adv_te_iter(args, tot_s, tot_x, G_model, Orig_G_model):
     upd_res = []
