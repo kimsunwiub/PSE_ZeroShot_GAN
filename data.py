@@ -60,7 +60,48 @@ def init_pers_set(args):
     session_id = args.seed
 
     te_spkr_dir = '/home/kimsunw/data/LibriSpeech/test-clean'
-    spkr_ids = [x for x in os.listdir(te_spkr_dir) if 'txt' not in x]
+#     spkr_ids = [x for x in os.listdir(te_spkr_dir) if 'txt' not in x]
+    spkr_ids = [
+        '2094',
+        '4970',
+        '1320',
+        '4992',
+        '3575',
+        '237',
+        '7729',
+        '1221',
+        '4507',
+        '8463',
+        '1188',
+        '5639',
+        '4077',
+        '7127',
+        '4446',
+        '2300',
+        '3570',
+        '61',
+        '8224',
+        '8230',
+        '8455',
+        '2830',
+        '5683',
+        '6829',
+        '121',
+        '260',
+        '5105',
+        '672',
+        '908',
+        '5142',
+        '1580',
+        '1284',
+        '6930',
+        '7021',
+        '7176',
+        '3729',
+        '8555',
+        '1995',
+        '1089',
+        '2961']
     session_spkr = spkr_ids[session_id]
     te_spkr_id = "{}/{}".format(te_spkr_dir, session_spkr)
     spkr_utts = []
@@ -72,7 +113,49 @@ def init_pers_set(args):
 
     # Select noise for the session
     noise_dir = '/home/kimsunw/data/formatted_wham/'
-    all_noise_batch_list = [x for x in os.listdir(noise_dir) if '.sh' not in x]
+#     all_noise_batch_list = [x for x in os.listdir(noise_dir) if '.sh' not in x]
+    all_noise_batch_list = [
+        'Tomatina',
+        'CalafiaTaqueria',
+        'CLinda',
+        'DogBrew',
+        'LinkedInLobby',
+        'LakeshoreCafe',
+        'Marsbar',
+        'TheLocal',
+        'Lucky13',
+        'TheBeanery',
+        'DoloresParkCafe',
+        'TheMarket',
+        'StarbucksOakland',
+        'WesCafeAlameda',
+        'TheGroveonMission',
+        'Chipotle',
+        'StarbucksParkSt',
+        'inandoutalameda',
+        'PeetsCoffee-NHFAlameda',
+        'WholeFoodsCafe',
+        'A15Linda',
+        'Lapanca',
+        'GoldCaneCocktailLounge',
+        'MakeWesting',
+        'LuckyT1North(17)',
+        'StarbucksShothShore',
+        'Luckyeast',
+        'MCollins',
+        'Almanac',
+        'AtlasCafe',
+        'Tertuliagalleryandcoffee',
+        'VanKleef',
+        'HC',
+        'Peets-NHF',
+        'Sidestreetpho',
+        'Anotherpeetsalameda',
+        'CoffeeBar',
+        'StreetTaco',
+        'StarbucksBridgeside',
+        'FourBarrelsCoffee']
+
     noise_cls = all_noise_batch_list[session_id]
     noise_sigs = os.listdir("{}/{}".format(noise_dir, noise_cls))
     noise_sigs = np.array(["{}/{}/{}".format(noise_dir, noise_cls, x) for x in noise_sigs])

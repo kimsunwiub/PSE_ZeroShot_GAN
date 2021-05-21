@@ -51,8 +51,12 @@ def parse_arguments():
     parser.add_argument('--is_g_ctn', action='store_true')
     parser.add_argument('--is_wgan', action='store_true')
     parser.add_argument("--g_iter_x", type=int, default=1)
-    parser.add_argument('--is_anchor', action='store_true')
         
+    parser.add_argument("--start_seed", type=int, default=0)
+    
+    parser.add_argument('--is_baseline', action='store_true')
+    parser.add_argument('--is_ttur', action='store_true')
+    
     return parser.parse_args()
       
 args = parse_arguments()
@@ -69,6 +73,8 @@ os.environ['TF_CPP_MIN_LOG_LEVEL'] = '3'
 # Data
 tr_speech_ds = torchaudio.datasets.LIBRISPEECH("{}/".format(args.data_dir), url="train-clean-100", download=True)
 va_speech_ds = torchaudio.datasets.LIBRISPEECH("{}/".format(args.data_dir), url="dev-clean", download=True)
+noise_ds = musan_train_prep_dataset('{}/musan/noise/sound-bible'.format(args.data_dir))
+
 kwargs = {'num_workers': 0, 'pin_memory': True, 'drop_last': True}
 tr_speech_dataloader = data.DataLoader(dataset=tr_speech_ds,
                             batch_size=args.batch_size,
@@ -80,10 +86,15 @@ va_speech_dataloader = data.DataLoader(dataset=va_speech_ds,
                             shuffle=False,
                             collate_fn= lambda x: data_processing(x, args.n_frames, "speech"),
                             **kwargs)
+noise_dataloader = data.DataLoader(dataset=noise_ds,
+                            batch_size=args.batch_size,
+                            shuffle=False,
+                            collate_fn= lambda x: data_processing(x, args.n_frames, "noise"),
+                            **kwargs)
 
 snr_ranges_all = [-5,0,5,10]
 loss_fn = nn.MSELoss()
-for seed in range(40):
+for seed in range(args.start_seed, 40):
     args.seed = seed
     print("Running for seed ", args.seed)
         
@@ -132,7 +143,7 @@ for seed in range(40):
                 args.stft_frames)
         D_optimizer = torch.optim.Adam(
             params=D_model.parameters(),
-            lr=args.learning_rate
+            lr=args.learning_rate * 4 if args.is_ttur else args.learning_rate
         )
         if args.load_discriminator:
             load_model(D_model, args.load_discriminator)
@@ -158,11 +169,14 @@ for seed in range(40):
         te_upd_sdr = []
         te_ori_sdr = []
         
-        prev_te_p = -100
+        va_ea_upd_sdr = []
+        va_ea_ori_sdr = []
         
-        tr_speech_iter = iter(tr_speech_dataloader)
-        va_speech_iter = iter(va_speech_dataloader)
-        
+        best_te_impr = 0.
+        best_va_ea_impr = 0.
+        stop_counter = 0
+        stopping_point = 3 if args.is_g_ctn else 15
+        start_counter = False
         for ep in range(args.tot_epoch):
             # Train
             tr_s = shuffle_set(tr_s)
@@ -172,7 +186,7 @@ for seed in range(40):
             tr_x = tr_x[:tr_len-(tr_len%args.batch_size)]
 
             L_gf, L_r, L_f, gp = run_gan_iter(
-                args, tr_x, tr_speech_iter, G_model, Orig_G_model, D_model, G_optimizer, D_optimizer)
+                args, tr_x, tr_speech_dataloader, G_model, Orig_G_model, D_model, G_optimizer, D_optimizer)
             upd_sdr, ori_sdr = run_adv_te_iter(args, tr_s, tr_x, G_model, Orig_G_model)
             tr_upd_sdr.append(upd_sdr)
             tr_ori_sdr.append(ori_sdr)
@@ -183,7 +197,7 @@ for seed in range(40):
 
             # Eval
             L_gf, L_r, L_f, gp = run_gan_iter(
-                args, va_x, va_speech_iter, G_model, Orig_G_model, D_model)
+                args, va_x, va_speech_dataloader, G_model, Orig_G_model, D_model)
             upd_sdr, ori_sdr = run_adv_te_iter(args, va_s, va_x, G_model, Orig_G_model)
             va_upd_sdr.append(upd_sdr)
             va_ori_sdr.append(ori_sdr)
@@ -196,10 +210,14 @@ for seed in range(40):
             upd_sdr, ori_sdr = run_adv_te_iter(args, te_s, te_x, G_model, Orig_G_model)
             te_upd_sdr.append(upd_sdr)
             te_ori_sdr.append(ori_sdr)
+            
+            # Early stopping
+            upd_sdr, ori_sdr = val_score(args, va_speech_dataloader, noise_dataloader, G_model, Orig_G_model)
+            va_ea_upd_sdr.append(upd_sdr)
+            va_ea_ori_sdr.append(ori_sdr)
 
             if (ep+1) % args.print_every == 0:
-                if args.is_anchor:
-                    print("Anchor")
+
                 logging.info("Epoch {} Training. USDR: {:.2f} | OSDR: {:.2f}. Losses. G: {:.2f} | Real: {:.2f} | Fake: {:.2f}".format(
                     ep, 
                     tr_upd_sdr[-1],
@@ -219,42 +237,54 @@ for seed in range(40):
                 
                 if args.is_wgan:
                     logging.info("GP. Tr: {:.2f}, Va:{:.2f}".format(tr_losses_gp[-1], va_losses_gp[-1]))
-                if args.is_anchor:
-                    print("Anchor")
+                
                 logging.info("Epoch {} Testing. USDR: {:.2f} | OSDR: {:.2f}".format(
                     ep, 
                     te_upd_sdr[-1],
                     te_ori_sdr[-1],
                 ))
+                
+                logging.info("Epoch {} Early Stopping. USDR: {:.2f} | OSDR: {:.2f}".format(
+                    ep, 
+                    va_ea_upd_sdr[-1],
+                    va_ea_ori_sdr[-1],
+                ))
             
-#             if ep > 10:
-#                 curr_te_p = np.mean(te_upd_sdr[-5:])
-#                 if (curr_te_p - prev_te_p) < 0:
-#                     logging.info("Epoch {} Exiting.".format(ep))
-#                     break
-#                 prev_te_p = curr_te_p
-
-        seed_dict = {
-            "tr_losses_gf": tr_losses_gf,
-            "tr_losses_r": tr_losses_r,
-            "tr_losses_f": tr_losses_f,
-            "tr_losses_gp": tr_losses_gp,
-            "va_losses_gf": va_losses_gf,
-            "va_losses_r": va_losses_r,
-            "va_losses_f": va_losses_f,
-            "va_losses_gp": va_losses_gp,
+            rundata = {"tr_losses_gf": tr_losses_gf, "tr_losses_r": tr_losses_r, "tr_losses_f": tr_losses_f, "tr_losses_gp": tr_losses_gp, "tr_upd_sdr": tr_upd_sdr, "tr_ori_sdr": tr_ori_sdr,
+                        "va_losses_gf": va_losses_gf, "va_losses_r": va_losses_r, "va_losses_f": va_losses_f, "va_losses_gp": va_losses_gp, "va_upd_sdr": va_upd_sdr, "va_ori_sdr": va_ori_sdr,
+                        "te_upd_sdr": te_upd_sdr, "te_ori_sdr": te_ori_sdr, "va_ea_upd_sdr": va_ea_upd_sdr, "va_ea_ori_sdr": va_ea_ori_sdr, "epoch": ep}
             
-            "tr_upd_sdr": tr_upd_sdr,
-            "tr_ori_sdr": tr_ori_sdr,
-            "va_upd_sdr": va_upd_sdr,
-            "va_ori_sdr": va_ori_sdr,
-            "te_upd_sdr": te_upd_sdr,
-            "te_ori_sdr": te_ori_sdr,
+            diff = (te_upd_sdr[-1] - te_ori_sdr[-1])
+            if diff > best_te_impr:
+                logging.info("Best impr: {:.3f}".format(diff))
+                best_te_impr = diff                
+                if args.is_save:
+                    save_gan_model(G_model, D_model, rundata, output_directory, save_setting="te")
+                    
+            if diff < -.1:
+                if not start_counter:
+                    logging.info("Stop Counter started.")
+                    start_counter = True
+            else:
+                if start_counter:
+                    logging.info("Stop Counter stopped.")
+                    start_counter = False
+                    stop_counter = 0
+                    
+            if start_counter:
+                stop_counter += 1
+                if stop_counter > stopping_point:
+                    logging.info("Stop Counter reached. Exiting")
+                    break
             
-            "epoch": 666,
-        }
-
+            diff = (va_ea_upd_sdr[-1] - va_ea_ori_sdr[-1])
+            if diff > best_va_ea_impr:
+                logging.info("Best impr: {:.3f}".format(diff))
+                best_va_ea_impr = diff
+                if args.is_save:
+                    save_gan_model(G_model, D_model, rundata, output_directory, save_setting="va_ea")
+            
         if args.is_save:
-            save_model(D_model, output_directory, seed_dict, is_last=True, model2=G_model)
+            save_gan_model(G_model, D_model, rundata, output_directory, save_setting="last")
             
 logging.info("Finished KD")

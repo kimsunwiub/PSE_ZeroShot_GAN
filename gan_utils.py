@@ -31,6 +31,19 @@ from models import initialize_weights
 eps = 1e-6
 logging.getLogger().setLevel(logging.DEBUG)
 
+def save_gan_model(G_model, D_model, rundata, output_directory, save_setting):
+    curr_epoch = rundata['epoch']
+#     suffix = '{}_{}'.format(save_setting, curr_epoch)
+    suffix = save_setting
+    
+    torch.save(G_model.state_dict(), "{}/Gmodel_{}.pt".format(output_directory, suffix))
+    torch.save(D_model.state_dict(), "{}/Dmodel_{}.pt".format(output_directory, suffix))
+    
+    data_save_dir = "{}/rundata_{}.pt".format(output_directory, suffix)
+    with open(data_save_dir, 'wb') as handle:
+        pickle.dump(rundata, handle, protocol=pickle.HIGHEST_PROTOCOL)
+        
+    logging.info("Saved as {}/{}".format(output_directory, suffix))
 
 def setup_gan_expr(args):
     args.n_frames = args.sr * args.duration
@@ -44,21 +57,24 @@ def setup_gan_expr(args):
     else:
         G_opt = '{}x{}'.format(args.G_num_layers, args.G_hidden_size)
     
-    if args.load_discriminator:
-        D_opt = '{}x{}'.format(args.D_num_layers, args.D_hidden_size)
-    else:
-        D_opt = 'None'
+    D_opt = '{}x{}'.format(args.D_num_layers, args.D_hidden_size)
+    if not args.load_discriminator:
+        D_opt += 'None'
+        
+    if args.is_baseline:
+        D_opt += 'Base'
+        
+    if args.is_ttur:
+        D_opt += 'TTUR'
     
     save_dir = "{}/D{}_G{}".format(args.save_dir, D_opt, G_opt)
-    if args.is_anchor:
-        save_dir += "_Anc"
     if args.is_adv:
         save_dir = "{}/gx{}/lr{:.0e}/seed{}/snr{}/".format(save_dir, args.g_iter_x, args.learning_rate, args.seed, args.snr_ranges[0])
     
     train_opt = "Pre"
     if args.is_adv:
         train_opt = "Adv"
-        
+            
     output_directory = "{}/expr{}_{}_bs{}_nfrm{}_GPU{}".format(
         save_dir, train_opt, t_stamp,
         args.batch_size, args.n_frames,
@@ -355,14 +371,13 @@ def run_gan_iter(args, tot_x, speech_dataloader, G_model, Orig_G_model, D_model,
         e = e/(e.std(1)[:,None] + eps)
         
         if args.is_wgan:
-            if args.is_anchor and (iter_+1) % 2 == 0:
-                L_r, L_f, gp = adv_pass(args, e, x, D_model, idx, D_optimizer)
+            if args.is_baseline:
+                L_r, L_f, gp = adv_pass(args, s, e, D_model, idx)
             else:
                 L_r, L_f, gp = adv_pass(args, s, e, D_model, idx, D_optimizer)
             gp_res.append(gp)
         else:
-            if args.is_anchor:
-                assert 1==0 # TODO
+            assert args.is_adv # TODO
             L_r, L_f = adv_pass_bc_gan(args, s, e, D_model, idx, D_optimizer)
         r_res.append(L_r)
         f_res.append(L_f)
@@ -440,6 +455,48 @@ def run_adv_te_iter(args, tot_s, tot_x, G_model, Orig_G_model):
         ori_res.append(ori_sdr)
 
     return np.mean(upd_res), np.mean(ori_res)
+
+def val_score(args, speech_dataloader, noise_dataloader, G_model, Orig_G_model):
+    upd_res = []
+    ori_res = []
+    noise_iter = iter(noise_dataloader)
+    for batch_idx, speech_batch in enumerate(speech_dataloader):
+        try:
+            noise_batch = next(noise_iter)
+        except StopIteration:
+            noise_iter = iter(noise_dataloader)
+            noise_batch = next(noise_iter)
+
+        snr_db_batch = np.random.uniform(
+            low=min(args.snr_ranges), high=max(args.snr_ranges), size=args.batch_size).astype(
+            np.float32)
+
+        mix_batch = mix_signals_batch(speech_batch, noise_batch, snr_db_batch).to(args.device)
+        if args.is_g_ctn:
+            upd_e = denoise_signal_ctn(args, mix_batch.to(args.device), G_model).detach().cpu()
+            ori_e = denoise_signal_ctn(args, mix_batch.to(args.device), Orig_G_model).detach().cpu()
+        else:
+            upd_e = denoise_signal(args, mix_batch.to(args.device), G_model).detach().cpu()
+            ori_e = denoise_signal(args, mix_batch.to(args.device), Orig_G_model).detach().cpu()
+
+        # Truncate to same lengths
+        _, s, _ = prep_sig_ml(speech_batch, upd_e)
+        _, x, _ = prep_sig_ml(mix_batch, upd_e)
+
+        # Standardize
+        s = s/(s.std(1)[:,None] + eps)
+        x = x/(x.std(1)[:,None] + eps)
+        upd_e = upd_e/(upd_e.std(1)[:,None] + eps)
+        ori_e = ori_e/(ori_e.std(1)[:,None] + eps)
+
+        upd_sdr = float(calculate_sisdr(s.detach().cpu(), upd_e).mean())
+        ori_sdr = float(calculate_sisdr(s.detach().cpu(), ori_e).mean())
+
+        upd_res.append(upd_sdr)
+        ori_res.append(ori_sdr)
+
+    return np.mean(upd_res), np.mean(ori_res)
+    
 
 def run_baseline_se(args, tot_s, tot_x, G_model, G_optimizer, D_model=None):
     total_loss = []
